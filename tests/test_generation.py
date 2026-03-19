@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
 from mamba_ssm.models.config_mamba import MambaConfig
 from mamba_ssm.utils.generation import InferenceParams
+from mamba_ssm.utils.device import get_device
 
 import pytest
 
@@ -13,7 +14,7 @@ from einops import rearrange, repeat
 def test_generation():
     batch = 3
     seqlen = 20
-    device = "cuda"
+    device = get_device()
     dtype = torch.float16
 
     config = MambaConfig(
@@ -47,7 +48,7 @@ def test_generation_varlen():
     seqlens = [170, 65, 100]
     genlen = 20
     total_seqlen = sum(seqlens)
-    device = "cuda"
+    device = get_device()
     dtype = torch.float16
 
     config = MambaConfig(
@@ -120,7 +121,7 @@ def test_generation_varlen_with_padding():
     genlen = 20
     total_seqlen = sum(seqlens)
     assert total_seqlen == padded_seqlen
-    device = "cuda"
+    device = get_device()
     dtype = torch.float16
 
     config = MambaConfig(

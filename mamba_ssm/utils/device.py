@@ -94,3 +94,64 @@ def get_sm_count(device):
             return 64
     else:
         return 1
+
+
+def get_device():
+    """Get the default accelerator device string for tests and benchmarks."""
+    return get_accelerator_type()
+
+
+def synchronize():
+    """Device-agnostic synchronization."""
+    if is_cuda_available():
+        torch.cuda.synchronize()
+    elif is_xpu_available():
+        torch.xpu.synchronize()
+
+
+def manual_seed_all(seed):
+    """Set seed for all accelerator devices."""
+    torch.manual_seed(seed)
+    if is_cuda_available():
+        torch.cuda.manual_seed_all(seed)
+    if is_xpu_available():
+        torch.xpu.manual_seed_all(seed)
+
+
+def empty_cache():
+    """Clear accelerator memory cache."""
+    if is_cuda_available():
+        torch.cuda.empty_cache()
+    elif is_xpu_available():
+        torch.xpu.empty_cache()
+
+
+def reset_peak_memory_stats():
+    """Reset peak memory tracking."""
+    if is_cuda_available():
+        torch.cuda.reset_peak_memory_stats()
+    elif is_xpu_available():
+        torch.xpu.reset_peak_memory_stats()
+
+
+def max_memory_allocated():
+    """Get peak memory allocated in bytes."""
+    if is_cuda_available():
+        return torch.cuda.max_memory_allocated()
+    elif is_xpu_available():
+        return torch.xpu.max_memory_allocated()
+    return 0
+
+
+def get_device_name(index=0):
+    """Get device name string."""
+    if is_cuda_available():
+        return torch.cuda.get_device_name(index)
+    elif is_xpu_available():
+        return torch.xpu.get_device_properties(index).name
+    return "cpu"
+
+
+def is_gpu_available():
+    """Check if any GPU accelerator (CUDA or XPU) is available."""
+    return is_cuda_available() or is_xpu_available()

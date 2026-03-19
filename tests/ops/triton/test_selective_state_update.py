@@ -9,6 +9,7 @@ import pytest
 from einops import rearrange, repeat
 
 from mamba_ssm.ops.triton.selective_state_update import selective_state_update, selective_state_update_ref
+from mamba_ssm.utils.device import get_device
 
 
 @pytest.mark.parametrize("itype", [torch.float32, torch.float16, torch.bfloat16])
@@ -20,7 +21,7 @@ from mamba_ssm.ops.triton.selective_state_update import selective_state_update, 
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
 # @pytest.mark.parametrize("dim", [2048])
 def test_selective_state_update(dim, dstate, has_z, itype):
-    device = "cuda"
+    device = get_device()
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
         rtol, atol = 1e-2, 5e-2
@@ -64,7 +65,7 @@ def test_selective_state_update(dim, dstate, has_z, itype):
 @pytest.mark.parametrize("dim", [2048, 4096])
 # @pytest.mark.parametrize("dim", [2048])
 def test_selective_state_update_with_heads(dim, dstate, ngroups, has_z, tie_hdim, itype):
-    device = "cuda"
+    device = get_device()
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 3e-2)
     if itype == torch.bfloat16:
         rtol, atol = 1e-2, 1e-1
@@ -110,7 +111,7 @@ def test_selective_state_update_with_heads(dim, dstate, ngroups, has_z, tie_hdim
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
 # @pytest.mark.parametrize("dim", [2048])
 def test_selective_state_update_with_batch_indices(dim, dstate, has_z, itype):
-    device = "cuda"
+    device = get_device()
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
         rtol, atol = 6e-2, 6e-2
@@ -159,7 +160,7 @@ def test_selective_state_update_with_batch_indices(dim, dstate, has_z, itype):
 @pytest.mark.parametrize("dim", [2048, 4096])
 # @pytest.mark.parametrize("dim", [2048])
 def test_selective_state_update_with_heads_with_batch_indices(dim, dstate, ngroups, has_z, tie_hdim, itype):
-    device = "cuda"
+    device = get_device()
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 3e-2)
     if itype == torch.bfloat16:
         rtol, atol = 1e-1, 1e-1

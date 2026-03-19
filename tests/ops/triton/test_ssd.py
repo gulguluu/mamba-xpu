@@ -15,6 +15,7 @@ from mamba_ssm.ops.triton.ssd_state_passing import _state_passing_fwd
 from mamba_ssm.ops.triton.ssd_chunk_scan import chunk_scan, chunk_scan_ref
 from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined, mamba_chunk_scan, ssd_chunk_scan_combined_ref, ssd_selective_scan
 from mamba_ssm.ops.triton.ssd_combined import mamba_split_conv1d_scan_combined, mamba_split_conv1d_scan_ref
+from mamba_ssm.utils.device import get_device
 
 
 def detach_clone(*args):
@@ -28,7 +29,7 @@ def detach_clone(*args):
 @pytest.mark.parametrize('chunk_size', [64, 128])
 # @pytest.mark.parametrize('chunk_size', [128])
 def test_chunk_state_varlen(chunk_size, ngroups, dtype):
-    device = 'cuda'
+    device = get_device()
     rtol, atol = (1e-2, 3e-3)
     # set seed
     torch.random.manual_seed(chunk_size + (ngroups if ngroups != "max" else 64))

@@ -8,6 +8,7 @@ import pytest
 from einops import rearrange, repeat
 
 from mamba_ssm.ops.triton.layernorm_gated import layernorm_fn, rms_norm_ref
+from mamba_ssm.utils.device import get_device
 
 
 @pytest.mark.parametrize("norm_before_gate", [True, False])
@@ -31,7 +32,7 @@ def test_layer_norm_gated(d, dtype, wtype, has_bias, has_z, is_rms_norm, has_gro
         pytest.skip()
     if not norm_before_gate and not is_rms_norm:  # Reference LN isn't implemented for this case yet
         pytest.skip()
-    device = 'cuda'
+    device = get_device()
     rtol, atol = (1e-5, 1e-5) if dtype == torch.float32 else (1e-2, 8e-3)
     group_size = None if not has_group else 64
     # set seed

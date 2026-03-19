@@ -8,6 +8,10 @@ import torch
 from triton.testing import do_bench
 
 from mamba_ssm.utils.determinism import set_deterministic_mode
+from mamba_ssm.utils.device import (
+    get_device, synchronize, empty_cache, reset_peak_memory_stats,
+    max_memory_allocated, get_device_name, is_gpu_available,
+)
 
 MODEL_PRESETS = {
     "small": {"nheads": 32, "headdim": 64, "dstate": 64, "ngroups": 1},
@@ -17,24 +21,24 @@ MODEL_PRESETS = {
 
 def _reset_peak_memory() -> None:
     gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
-    torch.cuda.synchronize()
+    empty_cache()
+    reset_peak_memory_stats()
+    synchronize()
 
 
 def _peak_memory_mb(fn, *, warmup: int = 3) -> float:
     for _ in range(warmup):
         fn()
-    torch.cuda.synchronize()
+    synchronize()
     _reset_peak_memory()
     fn()
-    torch.cuda.synchronize()
-    return torch.cuda.max_memory_allocated() / (1024 * 1024)
+    synchronize()
+    return max_memory_allocated() / (1024 * 1024)
 
 
 def make_tensors(*, batch: int, seqlen: int, nheads: int, headdim: int, dstate: int, ngroups: int, chunk_size: int,
                  dtype: torch.dtype = torch.bfloat16) -> dict[str, torch.Tensor]:
-    device = "cuda"
+    device = get_device()
     nchunks = math.ceil(seqlen / chunk_size)
     return {
         "x": torch.randn(batch, seqlen, nheads, headdim, device=device, dtype=dtype),
@@ -100,8 +104,8 @@ def main() -> None:
     parser.add_argument("--chunk-size", type=int, default=256)
     args = parser.parse_args()
 
-    if not torch.cuda.is_available():
-        raise SystemExit("CUDA not available")
+    if not is_gpu_available():
+        raise SystemExit("No GPU available (CUDA or XPU required)")
 
     p = MODEL_PRESETS[args.preset]
     tensors = make_tensors(
@@ -115,7 +119,7 @@ def main() -> None:
     )
     benches = get_benchmarks(tensors, ngroups=p["ngroups"])
 
-    print(f"GPU: {torch.cuda.get_device_name(0)}")
+    print(f"GPU: {get_device_name(0)}")
     print(f"preset={args.preset} batch={args.batch} seqlen={args.seqlen} chunk_size={args.chunk_size}")
     print(f"{'kernel':<20} {'ms':>9} {'det_ms':>9} {'ms_%':>6} {'MB':>9} {'det_MB':>9} {'MB_%':>6}")
 

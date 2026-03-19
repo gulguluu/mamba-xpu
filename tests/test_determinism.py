@@ -5,6 +5,10 @@ import os
 import pytest
 import torch
 
+from mamba_ssm.utils.device import (
+    get_device, synchronize, manual_seed_all, is_gpu_available,
+)
+
 
 def _set_deterministic(enabled: bool) -> None:
     torch.use_deterministic_algorithms(enabled)
@@ -13,8 +17,7 @@ def _set_deterministic(enabled: bool) -> None:
 
 
 def _set_seeds(seed: int) -> None:
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    manual_seed_all(seed)
 
 
 def _max_abs_diff(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -34,7 +37,7 @@ def _make_inputs(
     import math
 
     _set_seeds(seed)
-    device = "cuda"
+    device = get_device()
 
     batch = 2
     seqlen = 2048
@@ -136,7 +139,7 @@ def _run_case_outputs(
     else:
         raise AssertionError(f"Unknown case: {case}")
 
-    torch.cuda.synchronize()
+    synchronize()
     return {k: v.detach().clone().float() for k, v in out.items() if v is not None}
 
 
@@ -179,7 +182,7 @@ def _kernel_close_to_default(case: str, headdim: int, dstate: int, d_has_hdim: b
             assert torch.allclose(default[k], det[k], atol=atol, rtol=rtol), f"{case} output {k} not close (headdim={headdim}, dstate={dstate})"
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not is_gpu_available(), reason="GPU required")
 @pytest.mark.parametrize("dstate", _DSTATES)
 @pytest.mark.parametrize("headdim", _HEADDIMS)
 @pytest.mark.parametrize("case", _KERNEL_CASES)
@@ -187,7 +190,7 @@ def test_kernel_reproducible(case: str, headdim: int, dstate: int):
     _kernel_is_reproducible(case, headdim, dstate)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not is_gpu_available(), reason="GPU required")
 @pytest.mark.parametrize("dstate", _DSTATES)
 @pytest.mark.parametrize("headdim", _HEADDIMS)
 @pytest.mark.parametrize("case,d_has_hdim", _COMBINED_CASES)
@@ -195,7 +198,7 @@ def test_combined_kernel_reproducible(case: str, d_has_hdim: bool, headdim: int,
     _kernel_is_reproducible(case, headdim, dstate, d_has_hdim)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not is_gpu_available(), reason="GPU required")
 @pytest.mark.parametrize("dstate", _DSTATES)
 @pytest.mark.parametrize("headdim", _HEADDIMS)
 @pytest.mark.parametrize("case", _KERNEL_CASES)
@@ -203,7 +206,7 @@ def test_kernel_close_to_default(case: str, headdim: int, dstate: int):
     _kernel_close_to_default(case, headdim, dstate)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not is_gpu_available(), reason="GPU required")
 @pytest.mark.parametrize("dstate", _DSTATES)
 @pytest.mark.parametrize("headdim", _HEADDIMS)
 @pytest.mark.parametrize("case,d_has_hdim", _COMBINED_CASES)
@@ -211,11 +214,11 @@ def test_combined_kernel_close_to_default(case: str, d_has_hdim: bool, headdim: 
     _kernel_close_to_default(case, headdim, dstate, d_has_hdim)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not is_gpu_available(), reason="GPU required")
 def test_default_mode_is_not_reproducible():
     from mamba_ssm.modules.mamba2 import Mamba2
 
-    device = "cuda"
+    device = get_device()
     dtype = torch.bfloat16
     seed = 123
     runs = 20
@@ -235,7 +238,7 @@ def test_default_mode_is_not_reproducible():
         x = x_data.clone().requires_grad_(True)
         y = model(x)
         (y.float().square().mean()).backward()
-        torch.cuda.synchronize()
+        synchronize()
         grads = {"input": x.grad.detach().float().clone()}
         for name, p in model.named_parameters():
             if p.grad is not None:
@@ -261,11 +264,11 @@ def test_default_mode_is_not_reproducible():
         )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not is_gpu_available(), reason="GPU required")
 def test_mamba2_fwd_bwd_deterministic_reproducible():
     from mamba_ssm.modules.mamba2 import Mamba2
 
-    device = "cuda"
+    device = get_device()
     dtype = torch.bfloat16
     seed = 123
     runs = 5
@@ -287,7 +290,7 @@ def test_mamba2_fwd_bwd_deterministic_reproducible():
         x = x_data.clone().requires_grad_(True)
         y = model(x)
         (y.float().square().mean()).backward()
-        torch.cuda.synchronize()
+        synchronize()
         grads: dict[str, torch.Tensor] = {"input": x.grad.detach().float().clone()}
         for name, p in model.named_parameters():
             if p.grad is not None:
@@ -304,11 +307,11 @@ def test_mamba2_fwd_bwd_deterministic_reproducible():
             assert _max_abs_diff(g0[k], g[k]) == 0.0, f"Mamba2 grad {k} differs"
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not is_gpu_available(), reason="GPU required")
 def test_mamba2_fwd_bwd_deterministic_close_to_default():
     from mamba_ssm.modules.mamba2 import Mamba2
 
-    device = "cuda"
+    device = get_device()
     dtype = torch.bfloat16
     seed = 123
     batch = 2
@@ -326,7 +329,7 @@ def test_mamba2_fwd_bwd_deterministic_close_to_default():
         x = torch.randn(batch, seqlen, model.d_model, device=device, dtype=dtype).requires_grad_(True)
         y = model(x)
         (y.float().square().mean()).backward()
-        torch.cuda.synchronize()
+        synchronize()
         grads: dict[str, torch.Tensor] = {"input": x.grad.detach().float().clone()}
         for name, p in model.named_parameters():
             if p.grad is not None:

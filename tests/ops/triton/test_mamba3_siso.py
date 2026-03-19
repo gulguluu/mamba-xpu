@@ -15,6 +15,7 @@ from einops import rearrange, repeat
 
 from mamba_ssm.ops.triton.mamba3.mamba3_siso_combined import mamba3_siso_combined
 from mamba_ssm.ops.triton.mamba3.mamba3_siso_step import mamba3_siso_step
+from mamba_ssm.utils.device import get_device
 
 
 # Reference Implementations
@@ -486,7 +487,7 @@ def create_mamba3_siso_inputs(
 
 def test_mamba3_siso_step(nheads_qk=4, has_Z=True, has_D=True):
     """Test Mamba-3 step kernel against reference recurrent implementation."""
-    device = 'cuda'
+    device = get_device()
     rtol = 5e-2
     dtype = torch.bfloat16
     torch.random.manual_seed(42)
@@ -561,7 +562,7 @@ def test_mamba3_siso_step(nheads_qk=4, has_Z=True, has_D=True):
 def test_mamba3_siso_combined_batched(nheads_qk=4, has_Z=True, has_D=True, headdim_qk=128):
     """Test Mamba-3 combined forward+backward against fwd reference.
     """
-    device = 'cuda'
+    device = get_device()
     rtol = 1e-1
     dtype = torch.bfloat16
     torch.random.manual_seed(42)
@@ -675,7 +676,7 @@ def test_mamba3_siso_combined_batched(nheads_qk=4, has_Z=True, has_D=True, headd
 def test_mamba3_siso_combined_varlen(nheads_qk=4, has_Z=True, has_D=True, headdim_qk=128):
     """Test Mamba-3 combined forward+backward with variable-length sequences against fwd reference.
     """
-    device = 'cuda'
+    device = get_device()
     rtol = 1e-1
     dtype = torch.bfloat16
     torch.random.manual_seed(42)
@@ -842,7 +843,7 @@ def test_mamba3_siso_combined_varlen(nheads_qk=4, has_Z=True, has_D=True, headdi
 
 def test_mamba3_siso_step_ref_vs_fwd_ref(nheads_qk=4, has_Z=True, has_D=True):
     """Test that mamba3_siso_step_ref and mamba3_siso_fwd_ref produce identical outputs."""
-    device = 'cuda'
+    device = get_device()
     rtol = 1e-4  # Both are pure Python/PyTorch, so should match very closely
     dtype = torch.float32  # Use float32 for reference-vs-reference comparison
     torch.random.manual_seed(42)

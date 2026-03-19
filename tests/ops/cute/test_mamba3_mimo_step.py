@@ -37,15 +37,17 @@ HDIM = 64
 DSTATE = 128
 MIMO_DIM = 4
 USE_TILELANG = True
+from mamba_ssm.utils.device import get_device, is_gpu_available, manual_seed_all
+
 DTYPE = torch.bfloat16
-DEVICE = "cuda"
+DEVICE = get_device()
 RTOL = 0.1
 ATOL = 0.1
 
 
 def _require_cuda_and_kernel_deps() -> None:
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for mamba3 step tests")
+    if not is_gpu_available():
+        pytest.skip("GPU (CUDA or XPU) is required for mamba3 step tests")
     pytest.importorskip("tilelang")
     pytest.importorskip("triton")
 
@@ -149,13 +151,13 @@ def _run_case(*, is_outproj_norm: bool) -> RunOutputs:
     )
 
     torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
+    manual_seed_all(42)
     model_fwd = Mamba3(**cfg)
     model_fwd.eval()
 
     cfg_fp32 = {**cfg, "dtype": torch.float32}
     torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
+    manual_seed_all(42)
     model_fwd_fp32 = Mamba3(**cfg_fp32)
     model_fwd_fp32.eval()
     model_fwd_fp32.load_state_dict(
@@ -164,13 +166,13 @@ def _run_case(*, is_outproj_norm: bool) -> RunOutputs:
     )
 
     torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
+    manual_seed_all(42)
     model_step = Mamba3(**cfg)
     model_step.eval()
     model_step.load_state_dict(model_fwd.state_dict(), strict=False)
 
     torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
+    manual_seed_all(42)
     model_mix = Mamba3(**cfg)
     model_mix.eval()
     model_mix.load_state_dict(model_fwd.state_dict(), strict=False)
@@ -259,7 +261,7 @@ def run_step_benchmark(*, is_outproj_norm: bool) -> None:
     rotate_str = "halved" if USE_TILELANG else "pairwise"
 
     torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
+    manual_seed_all(42)
     model_step = Mamba3(**cfg)
     model_step.eval()
 

@@ -27,6 +27,9 @@ from torch import Tensor
 F = torch.nn.functional
 
 
+from mamba_ssm.utils.device import get_device
+_test_device = get_device()
+
 FIXED_B = 4
 FIXED_S = 2048
 FIXED_H = 16
@@ -52,8 +55,9 @@ CASE_GRID = [
 
 
 def _require_cuda_and_kernel_deps() -> None:
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for mamba3 tilelang tests")
+    from mamba_ssm.utils.device import is_gpu_available
+    if not is_gpu_available():
+        pytest.skip("GPU (CUDA or XPU) is required for mamba3 tilelang tests")
     pytest.importorskip("tilelang")
     pytest.importorskip("triton")
 
@@ -130,29 +134,30 @@ def build_inputs(
 ) -> dict:
     assert s % chunk_size == 0
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    from mamba_ssm.utils.device import manual_seed_all
+    manual_seed_all(seed)
 
-    q = torch.randn((b, s, r, g, n), device="cuda", dtype=dtype)
-    k = torch.randn((b, s, r, g, n), device="cuda", dtype=dtype)
-    v = torch.randn((b, s, h, p), device="cuda", dtype=dtype)
+    q = torch.randn((b, s, r, g, n), device=_test_device, dtype=dtype)
+    k = torch.randn((b, s, r, g, n), device=_test_device, dtype=dtype)
+    v = torch.randn((b, s, h, p), device=_test_device, dtype=dtype)
 
-    q_bias = torch.randn((h, r, n), device="cuda", dtype=torch.float32)
-    k_bias = torch.randn((h, r, n), device="cuda", dtype=torch.float32)
-    mimo_v = torch.randn((h, r, p), device="cuda", dtype=torch.float32) / r
-    mimo_o = torch.randn((h, r, p), device="cuda", dtype=torch.float32) / r
+    q_bias = torch.randn((h, r, n), device=_test_device, dtype=torch.float32)
+    k_bias = torch.randn((h, r, n), device=_test_device, dtype=torch.float32)
+    mimo_v = torch.randn((h, r, p), device=_test_device, dtype=torch.float32) / r
+    mimo_o = torch.randn((h, r, p), device=_test_device, dtype=torch.float32) / r
 
     z = torch.randn_like(v) if has_z else None
     mimo_z = torch.randn_like(mimo_v) if has_z else None
-    d = torch.randn((h,), device="cuda", dtype=torch.float32) if has_d else None
+    d = torch.randn((h,), device=_test_device, dtype=torch.float32) if has_d else None
 
     angles = torch.rand(
-        (b, s, h, n // rotary_dim_divisor), device="cuda", dtype=torch.float32
+        (b, s, h, n // rotary_dim_divisor), device=_test_device, dtype=torch.float32
     )
-    dt = F.softplus(-3.0 + torch.randn((b, h, s), device="cuda", dtype=torch.float32))
-    a = torch.rand((b, h, s), device="cuda", dtype=torch.float32)
+    dt = F.softplus(-3.0 + torch.randn((b, h, s), device=_test_device, dtype=torch.float32))
+    a = torch.rand((b, h, s), device=_test_device, dtype=torch.float32)
     dA = (-dt * a).detach()
     dA_cs, dA_cs_rev, segsum = mods.utils.compute_dacs_segsum_triton(dA, chunk_size)
-    trap = torch.rand((b, h, s), device="cuda", dtype=dtype)
+    trap = torch.rand((b, h, s), device=_test_device, dtype=dtype)
     dout = torch.randn_like(v)
 
     return {
@@ -195,7 +200,8 @@ def make_smoke_inputs(
 ):
     torch.manual_seed(seed)
     if device == "cuda":
-        torch.cuda.manual_seed_all(seed)
+        from mamba_ssm.utils.device import manual_seed_all
+    manual_seed_all(seed)
 
     Q = torch.randn(
         (batch, seqlen, mimo_rank, nheads_qk, headdim_qk),
@@ -1134,7 +1140,7 @@ def test_mamba_mimo_bwd_combined_prereduce_relative_errors_lt_10pct(
         has_z=False,
     )
     b, s, h, p_dim = inputs["v"].shape
-    dout_prereduce = torch.randn((b, s, r, h, p_dim), device="cuda", dtype=FIXED_DTYPE)
+    dout_prereduce = torch.randn((b, s, r, h, p_dim), device=_test_device, dtype=FIXED_DTYPE)
 
     ref_grads = run_ref_backward_fp32(
         mods,
@@ -1219,7 +1225,7 @@ def test_mamba_mimo_smoke_forward_backward(mods: SimpleNamespace) -> None:
         headdim_v=64,
         chunk_size=16,
         rotary_dim_divisor=FIXED_ROTARY_DIM_DIVISOR,
-        device="cuda",
+        device=_test_device,
         dtype=FIXED_DTYPE,
         seed=999,
     )
