@@ -211,8 +211,13 @@ def decode(
             return True
         return False
 
-    start = torch.cuda.Event(enable_timing=enable_timing)
-    end = torch.cuda.Event(enable_timing=enable_timing)
+    _device_type = input_ids.device.type
+    if _device_type == "xpu":
+        start = torch.xpu.Event(enable_timing=enable_timing)
+        end = torch.xpu.Event(enable_timing=enable_timing)
+    else:
+        start = torch.cuda.Event(enable_timing=enable_timing)
+        end = torch.cuda.Event(enable_timing=enable_timing)
 
     if enable_timing:
         start.record()
@@ -238,7 +243,10 @@ def decode(
         streamer.end()
     if enable_timing:
         end.record()
-        torch.cuda.synchronize()
+        if _device_type == "xpu":
+            torch.xpu.synchronize()
+        else:
+            torch.cuda.synchronize()
         print(f"Prompt processing + decoding time: {(start.elapsed_time(end)):.0f}ms")
     return GenerateDecoderOnlyOutput(sequences=torch.cat(sequences, dim=1), scores=tuple(scores))
 
@@ -317,7 +325,10 @@ def update_graph_cache(
             key_value_memory_dict=inf_cache,
             lengths_per_sample=lengths_per_sample,
         )
-        cache.mempool = torch.cuda.graphs.graph_pool_handle()
+        if device.type == "xpu":
+            cache.mempool = None  # XPU does not support CUDA graph pooling
+        else:
+            cache.mempool = torch.cuda.graphs.graph_pool_handle()
     for decoding_seqlen in decoding_seqlens:
         if (batch_size, decoding_seqlen) not in cache.callables:
             cache.callables[batch_size, decoding_seqlen] = capture_graph(
@@ -349,6 +360,31 @@ def capture_graph(
     inference_params.seqlen_offset = max_seqlen - decoding_seqlen
     inference_params.lengths_per_sample[:] = inference_params.seqlen_offset
 
+    if device.type == "xpu":
+        # XPU path: no CUDA graph support, use eager execution
+        for _ in range(n_warmups):
+            logits = model(
+                input_ids,
+                position_ids=position_ids,
+                inference_params=inference_params,
+                num_last_tokens=decoding_seqlen,
+            ).logits
+
+        def run(new_input_ids, new_position_ids, seqlen):
+            inference_params.lengths_per_sample[:] = seqlen
+            input_ids.copy_(new_input_ids)
+            position_ids.copy_(new_position_ids)
+            return model(
+                input_ids,
+                position_ids=position_ids,
+                inference_params=inference_params,
+                num_last_tokens=decoding_seqlen,
+            ).logits.clone()
+
+        inference_params.seqlen_offset = seqlen_offset_og
+        return run
+
+    # CUDA path: use CUDA graphs for optimized decoding
     # Warmup before capture
     s = torch.cuda.Stream()
     s.wait_stream(torch.cuda.current_stream())

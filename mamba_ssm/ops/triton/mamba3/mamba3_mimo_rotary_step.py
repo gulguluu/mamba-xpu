@@ -10,6 +10,7 @@ import torch
 import triton
 import triton.language as tl
 import triton.testing
+from mamba_ssm.utils.device import device_context
 #from flash_attn.cute.benchmark import pytorch_profiler
 
 @triton.jit
@@ -200,7 +201,7 @@ def apply_rotary_qk_inference_fwd(
     output_angle_state = torch.empty_like(angle_state) if not inplace else angle_state
 
     grid = lambda META: (nheads, batch)  # noqa
-    with torch.cuda.device(q.device.index):
+    with device_context(q.device):
         torch.library.wrap_triton(rotary_qk_inference_kernel)[grid](
             output_q,  # data ptrs
             output_k,

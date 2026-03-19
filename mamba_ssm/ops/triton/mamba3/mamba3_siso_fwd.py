@@ -433,7 +433,8 @@ def mamba3_siso_fwd_kernel(
 # Memory Allocator for TMA Descriptors
 def _alloc_fn(size: int, alignment: int, stream: Optional[int]):
     """Custom allocator for TMA descriptor global memory allocation."""
-    return torch.empty(size, device="cuda", dtype=torch.int8)
+    from mamba_ssm.utils.device import get_accelerator_type
+    return torch.empty(size, device=get_accelerator_type(), dtype=torch.int8)
 triton.set_allocator(_alloc_fn)
 
 def mamba3_siso_fwd(

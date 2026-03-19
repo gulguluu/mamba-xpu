@@ -17,6 +17,7 @@ import triton
 import triton.language as tl
 
 from mamba_ssm.utils.determinism import autotune_configs
+from mamba_ssm.utils.device import device_context, get_sm_count
 
 
 def layer_norm_ref(
@@ -128,10 +129,14 @@ def rms_norm_ref(
         return (out, out1) if not prenorm else (out, out1, x)
 
 def config_prune(configs):
+    from mamba_ssm.utils.device import is_xpu_available
 
-    if torch.version.hip:
+    if is_xpu_available():
+        # Intel XPU: SIMD width varies, use 32 as a safe default
+        warp_size = 32
+    elif torch.version.hip:
         try:
-            # set warp size based on gcn architecure 
+            # set warp size based on gcn architecure
             gcn_arch_name = torch.cuda.get_device_properties(0).gcnArchName
             if "gfx10" in gcn_arch_name or "gfx11" in gcn_arch_name:
                 # radeon
@@ -149,8 +154,8 @@ def config_prune(configs):
             warnings.warn(f"{e}, warp size set to {warp_size} based on device name: {device_name}", UserWarning)
 
     else:
-        # cuda 
-        warp_size = 32    
+        # cuda
+        warp_size = 32
 
     max_block_sz = 1024
     max_num_warps = max_block_sz // warp_size
@@ -367,7 +372,7 @@ def _layer_norm_fwd(
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
     if N > BLOCK_N:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
-    with torch.cuda.device(x.device.index):
+    with device_context(x.device):
         _layer_norm_fwd_1pass_kernel[(M,)](
             x,
             y,
@@ -657,7 +662,7 @@ def _layer_norm_bwd(
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
     if N > BLOCK_N:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
-    sm_count = torch.cuda.get_device_properties(x.device).multi_processor_count
+    sm_count = get_sm_count(x.device)
     _dw = torch.empty((sm_count, N), dtype=torch.float32, device=weight.device)
     _db = (
         torch.empty((sm_count, N), dtype=torch.float32, device=bias.device)
@@ -668,7 +673,7 @@ def _layer_norm_bwd(
     _db1 = torch.empty_like(_db) if bias1 is not None else None
     rows_per_program = math.ceil(M / sm_count)
     grid = (sm_count,)
-    with torch.cuda.device(x.device.index):
+    with device_context(x.device):
         _layer_norm_bwd_kernel[grid](
             x,
             weight,

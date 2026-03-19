@@ -20,7 +20,8 @@ from mamba_ssm.ops.triton.mamba3.angle_dt import angle_dt_fwd, angle_dt_bwd
 
 def _triton_alloc_fn(size: int, alignment: int, stream: Optional[int]):
     """Allocator for Triton runtime memory (TMA descriptors, scratch)."""
-    return torch.empty(size, device="cuda", dtype=torch.int8)
+    from mamba_ssm.utils.device import get_accelerator_type
+    return torch.empty(size, device=get_accelerator_type(), dtype=torch.int8)
 
 
 # Set allocator immediately at import time.

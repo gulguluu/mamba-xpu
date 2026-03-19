@@ -13,6 +13,8 @@ from einops import rearrange, repeat
 
 import triton
 import triton.language as tl
+
+from mamba_ssm.utils.device import is_accelerator_tensor
 from mamba_ssm.ops.triton.mamba3.utils import cos_approx, sin_approx, sigmoid_approx
 
 # =============================================================================
@@ -141,7 +143,7 @@ def compute_dzdo(
     
     # Validate inputs
     assert z is not None and o is not None and do is not None, "Z, O, and DO tensors must be provided"
-    assert z.is_cuda and o.is_cuda and do.is_cuda, "All tensors must be on CUDA"
+    assert all(is_accelerator_tensor(t) for t in [z, o, do]), "All tensors must be on a GPU (CUDA or XPU)"
     assert z.shape == do.shape and o.shape == do.shape, f"Shape mismatch: Z={z.shape}, O={o.shape}, DO={do.shape}"
 
     # Ensure contiguity for optimal memory access
@@ -664,7 +666,7 @@ def compute_dqkv(
         nchunks = (seqlen + chunk_size - 1) // chunk_size
 
     assert nheads % nheads_qk == 0, "nheads must be divisible by nheads_qk (for GQA support)"
-    assert q.is_cuda and k.is_cuda and v.is_cuda and da_cs.is_cuda and da_cs_sum.is_cuda and do.is_cuda, "All tensors must be on CUDA"
+    assert all(is_accelerator_tensor(t) for t in [q, k, v, da_cs, da_cs_sum, do]), "All tensors must be on a GPU (CUDA or XPU)"
 
     assert k.shape == q.shape
     assert v.shape == (batch, seqlen, nheads, headdim_v)
@@ -1770,7 +1772,8 @@ def compute_ddt_dtrap_dinput_states(
 
 def _alloc_fn(size: int, alignment: int, stream: Optional[int]):
     """Custom allocator for TMA descriptor global memory allocation."""
-    return torch.empty(size, device="cuda", dtype=torch.int8)
+    from mamba_ssm.utils.device import get_accelerator_type
+    return torch.empty(size, device=get_accelerator_type(), dtype=torch.int8)
 
 
 triton.set_allocator(_alloc_fn)

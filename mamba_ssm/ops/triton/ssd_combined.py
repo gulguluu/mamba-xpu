@@ -17,6 +17,7 @@ import triton
 import triton.language as tl
 
 from einops import rearrange, repeat
+from mamba_ssm.utils.device import device_context
 
 try:
     from causal_conv1d import causal_conv1d_fn
@@ -305,7 +306,7 @@ def _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=Non
     )
     grid_dx = lambda META: (triton.cdiv(chunk_size, META['BLOCK_SIZE_M']) * triton.cdiv(headdim, META['BLOCK_SIZE_N']),
                         batch * nchunks, nheads)
-    with torch.cuda.device(x.device.index):
+    with device_context(x.device):
         _chunk_scan_chunk_state_bwd_dx_kernel[grid_dx](
             x, CB, dout, dt, dA_cumsum, seq_idx, D, B, dstates, dx, ddt, dD,
             chunk_size, headdim, dstate,

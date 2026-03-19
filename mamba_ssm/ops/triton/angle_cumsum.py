@@ -8,6 +8,7 @@ import torch
 import triton
 import triton.language as tl
 from triton.language.extra import libdevice
+from mamba_ssm.utils.device import device_context
 
 class AngleDtFn(torch.autograd.Function):
     @staticmethod
@@ -342,7 +343,7 @@ def apply_angle_dt_fwd(
 
     # Step 1: compute the sum of each chunk. Don't write the output
     grid = lambda META: (nheads, num_chunks, batch)
-    with torch.cuda.device(angle.device.index):
+    with device_context(angle.device):
         torch.library.wrap_triton(angle_dt_fwd_kernel)[grid](
             None,  # output
             output_sum,
@@ -368,7 +369,7 @@ def apply_angle_dt_fwd(
     prefix = apply_cumsum(output_sum)  # Shape: (batch, num_chunks, nheads, dim)
 
     # Step 3: call angle_dt_kernel again with output and prefix, don't need to write output_sum
-    with torch.cuda.device(angle.device.index):
+    with device_context(angle.device):
         torch.library.wrap_triton(angle_dt_fwd_kernel)[grid](
             output,  # output
             None,    # output_sum (don't need to write)
@@ -439,7 +440,7 @@ def apply_angle_dt_bwd(
 
     # Step 1: compute the sum of each chunk. Don't write the output
     grid = lambda META: (nheads, num_chunks, batch)
-    with torch.cuda.device(angle.device.index):
+    with device_context(angle.device):
         torch.library.wrap_triton(angle_dt_bwd_kernel)[grid](
             None,  # GRAD_DT
             None,  # GRAD_ANGLE
@@ -469,7 +470,7 @@ def apply_angle_dt_bwd(
     prefix = apply_cumsum(grad_sum)  # Shape: (batch, num_chunks, nheads, dim)
 
     # Step 3: call angle_dt_fwd_chunksum_kernel again with output and prefix, don't need to write output_sum
-    with torch.cuda.device(angle.device.index):
+    with device_context(angle.device):
         torch.library.wrap_triton(angle_dt_bwd_kernel)[grid](
             grad_dt,
             grad_angle,
@@ -523,7 +524,7 @@ def apply_cumsum(
     BLOCK_D = triton.next_power_of_2(min(dim, 16))
 
     grid = lambda META: (nheads, triton.cdiv(dim, META["BLOCK_D"]), batch)
-    with torch.cuda.device(x.device.index):
+    with device_context(x.device):
         torch.library.wrap_triton(cumsum_kernel)[grid](
             output,
             x,

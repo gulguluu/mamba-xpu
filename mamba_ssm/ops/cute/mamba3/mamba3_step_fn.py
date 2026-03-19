@@ -622,7 +622,8 @@ def mamba3_step_fn(
         required_tensors.append(outproj)
     if has_z:
         required_tensors.extend([z, zproj])
-    assert all(t.is_cuda for t in required_tensors)
+    from mamba_ssm.utils.device import is_accelerator_tensor
+    assert all(is_accelerator_tensor(t) for t in required_tensors)
     assert state.dtype in [torch.float16, torch.bfloat16, torch.float32], "Unsupported input dtype"
 
     # Map torch dtypes to cutlass dtypes

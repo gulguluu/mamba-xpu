@@ -17,12 +17,19 @@ import urllib.error
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
 import torch
-from torch.utils.cpp_extension import (
-    BuildExtension,
-    CUDAExtension,
-    CUDA_HOME,
-    HIP_HOME
-)
+try:
+    from torch.utils.cpp_extension import (
+        BuildExtension,
+        CUDAExtension,
+        CUDA_HOME,
+        HIP_HOME
+    )
+except ImportError:
+    # On XPU-only systems, CUDAExtension may not be available
+    BuildExtension = None
+    CUDAExtension = None
+    CUDA_HOME = None
+    HIP_HOME = None
 
 
 with open("README.md", "r", encoding="utf-8") as fh:
@@ -42,6 +49,12 @@ FORCE_BUILD = os.getenv("MAMBA_FORCE_BUILD", "FALSE") == "TRUE"
 SKIP_CUDA_BUILD = os.getenv("MAMBA_SKIP_CUDA_BUILD", "FALSE") == "TRUE"
 # For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("MAMBA_FORCE_CXX11_ABI", "FALSE") == "TRUE"
+
+# Detect Intel XPU — skip CUDA build if targeting XPU
+XPU_BUILD = hasattr(torch, "xpu") and torch.xpu.is_available()
+if XPU_BUILD:
+    SKIP_CUDA_BUILD = True
+    print("\n\nIntel XPU detected — skipping CUDA extension build, using Triton kernels.\n\n")
 
 
 def get_platform():
@@ -130,9 +143,9 @@ cmdclass = {}
 ext_modules = []
 
 
-HIP_BUILD = bool(torch.version.hip)
+HIP_BUILD = bool(torch.version.hip) if hasattr(torch.version, 'hip') and torch.version.hip else False
 
-if not SKIP_CUDA_BUILD:
+if not SKIP_CUDA_BUILD and CUDAExtension is not None:
     print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
     TORCH_MAJOR = int(torch.__version__.split(".")[0])
     TORCH_MINOR = int(torch.__version__.split(".")[1])
@@ -399,9 +412,12 @@ setup(
         "einops",
         "triton>=3.5.0",
         "transformers",
-        "tilelang>=0.1.7.post3",
-        "nvidia-cutlass-dsl==4.4.1",
-        "quack-kernels==0.3.1",
-        # "causal_conv1d>=1.4.0",
-    ],
+    ] + (
+        # NVIDIA-specific dependencies (only needed for CUDA/HIP builds)
+        [
+            "tilelang>=0.1.7.post3",
+            "nvidia-cutlass-dsl==4.4.1",
+            "quack-kernels==0.3.1",
+        ] if not XPU_BUILD else []
+    ),
 )

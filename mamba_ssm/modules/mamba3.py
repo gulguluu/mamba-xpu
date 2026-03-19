@@ -9,13 +9,22 @@ import torch.nn.functional as F
 
 from mamba_ssm.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
 
-from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo import mamba3_mimo as mamba3_mimo_combined
+try:
+    from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo import mamba3_mimo as mamba3_mimo_combined
+except ImportError:
+    mamba3_mimo_combined = None
+
 from mamba_ssm.ops.triton.angle_cumsum import angle_dt
 from mamba_ssm.ops.triton.mamba3.mamba3_siso_combined import mamba3_siso_combined
 
 from mamba_ssm.ops.triton.mamba3.mamba3_mimo_rotary_step import apply_rotary_qk_inference_fwd
 
-from mamba_ssm.ops.cute.mamba3.mamba3_step_fn import mamba3_step_fn
+from mamba_ssm.utils.device import is_xpu_available
+
+try:
+    from mamba_ssm.ops.cute.mamba3.mamba3_step_fn import mamba3_step_fn
+except ImportError:
+    mamba3_step_fn = None
 
 class Mamba3(nn.Module):
     def __init__(
@@ -279,6 +288,67 @@ class Mamba3(nn.Module):
         y = torch.einsum("brhp,rhp->bhp", y, outpj)  # (batch, H, D)
         return y
 
+    def _step_pytorch(self, state, B_state, x_state, A, B, C, D,
+                       x, z, dt, trap, xproj, zproj, outproj):
+        """Pure PyTorch step implementation for XPU and non-CUDA devices.
+
+        Mirrors the CUTLASS mamba3_step_fn kernel logic using standard PyTorch ops.
+        """
+        compute_dtype = torch.float32
+        batch, nheads, hdim, dstate = state.shape
+        mimo = B_state.shape[1]
+
+        A_f = A.to(compute_dtype)        # (B, H)
+        dt_f = dt.to(compute_dtype)      # (B, H)
+        trap_f = trap.to(compute_dtype)  # (B, H)
+        D_f = D.to(compute_dtype)        # (H,)
+        x_f = x.to(compute_dtype)        # (B, H, D)
+        xst_f = x_state.to(compute_dtype) # (B, H, D)
+        B_f = B.to(compute_dtype)        # (B, R, H, S)
+        C_f = C.to(compute_dtype)        # (B, R, H, S)
+        Bst_f = B_state.to(compute_dtype) # (B, R, H, S)
+        Xp_f = xproj.to(compute_dtype)  # (R, H, D)
+        st_f = state.to(compute_dtype)   # (B, H, D, S)
+
+        alpha = torch.exp(A_f * dt_f)   # (B, H)
+        beta = (1.0 - trap_f) * dt_f * alpha  # (B, H)
+        gamma = trap_f * dt_f            # (B, H)
+
+        # x_vals: (B, R, H, D)
+        x_vals = x_f.unsqueeze(1) * Xp_f.unsqueeze(0)
+        xs_vals = xst_f.unsqueeze(1) * Xp_f.unsqueeze(0)
+
+        # State update
+        xBt_state = torch.einsum('brhd,brhs->bhds', x_vals * gamma[:, None, :, None], B_f)
+        xBt_prev = torch.einsum('brhd,brhs->bhds', xs_vals * beta[:, None, :, None], Bst_f)
+        new_state = st_f * alpha[:, :, None, None] + xBt_state + xBt_prev
+
+        # Output: state @ C
+        out_r = torch.einsum('bhds,brhs->brhd', new_state, C_f)  # (B, R, H, D)
+
+        # Add D * x skip connection
+        out_r = out_r + x_vals * D_f[None, None, :, None]
+
+        # Gate with z
+        if z is not None and zproj is not None:
+            z_f = z.to(compute_dtype)
+            Zp_f = zproj.to(compute_dtype)
+            z_vals = z_f.unsqueeze(1) * Zp_f.unsqueeze(0)  # (B, R, H, D)
+            out_r = out_r * z_vals * torch.sigmoid(z_vals)
+
+        # Project output along MIMO dim
+        if outproj is not None:
+            Op_f = outproj.to(compute_dtype)
+            y = torch.einsum('brhd,rhd->bhd', out_r, Op_f)
+        else:
+            y = out_r  # (B, R, H, D)
+
+        og_dtype = state.dtype
+        if self.is_outproj_norm and outproj is None:
+            # Caller handles postprocess
+            return y.to(og_dtype), new_state.to(og_dtype)
+        return y.to(og_dtype), new_state.to(og_dtype)
+
     def step(self, u, angle_state, ssm_state, k_state, v_state, **kwargs):
         """
         Decode function using CuteDSL kernel from mamba3_step_fn.py.
@@ -346,52 +416,71 @@ class Mamba3(nn.Module):
             zpj = torch.ones(self.mimo_rank, self.nheads, self.headdim, device=z.device, dtype=z.dtype)
             outpj = torch.ones(self.mimo_rank, self.nheads, self.headdim, device=x.device, dtype=x.dtype)
 
-        if self.is_outproj_norm:
-            batch = x.shape[0]
-            y = torch.empty(batch, self.mimo_rank, self.nheads, self.headdim, device=x.device, dtype=x.dtype)
-            mamba3_step_fn(
-                ssm_state,
-                k_state,
-                v_state,
-                A,
-                B,
-                C,
-                self.D,
-                x,
-                DT,
-                trap,
-                xpj,
-                outproj=None,
-                state_out=None, # can be not in place if pass in state_out
-                out=y,
-                z=None,
-                zproj=None,
-                tile_D=64,
-                num_warps=4,
-            )
-            y = self._postprocess(y, outpj, z, zpj, self.headdim)
+        # Choose between CUTLASS kernel (CUDA) and PyTorch fallback (XPU/other)
+        use_cute_kernel = (mamba3_step_fn is not None and x.is_cuda)
+
+        if use_cute_kernel:
+            if self.is_outproj_norm:
+                batch = x.shape[0]
+                y = torch.empty(batch, self.mimo_rank, self.nheads, self.headdim, device=x.device, dtype=x.dtype)
+                mamba3_step_fn(
+                    ssm_state,
+                    k_state,
+                    v_state,
+                    A,
+                    B,
+                    C,
+                    self.D,
+                    x,
+                    DT,
+                    trap,
+                    xpj,
+                    outproj=None,
+                    state_out=None,
+                    out=y,
+                    z=None,
+                    zproj=None,
+                    tile_D=64,
+                    num_warps=4,
+                )
+                y = self._postprocess(y, outpj, z, zpj, self.headdim)
+            else:
+                y = torch.empty_like(x)
+                mamba3_step_fn(
+                    ssm_state,
+                    k_state,
+                    v_state,
+                    A,
+                    B,
+                    C,
+                    self.D,
+                    x,
+                    DT,
+                    trap,
+                    xpj,
+                    outproj=outpj,
+                    state_out=None,
+                    out=y,
+                    z=z,
+                    zproj=zpj,
+                    tile_D=64,
+                    num_warps=4,
+                )
         else:
-            y = torch.empty_like(x)
-            mamba3_step_fn(
-                ssm_state,
-                k_state,
-                v_state,
-                A,
-                B,
-                C,
-                self.D,
-                x,
-                DT,
-                trap,
-                xpj,
-                outproj=outpj,
-                state_out=None, # can be not in place if pass in state_out
-                out=y,
-                z=z,
-                zproj=zpj,
-                tile_D=64,
-                num_warps=4,
-            )
+            # Pure PyTorch fallback for XPU and non-CUDA devices
+            if self.is_outproj_norm:
+                y, new_state = self._step_pytorch(
+                    ssm_state, k_state, v_state, A, B, C, self.D,
+                    x, None, DT, trap, xpj, None, None,
+                )
+                ssm_state.copy_(new_state)
+                y = self._postprocess(y, outpj, z, zpj, self.headdim)
+            else:
+                y, new_state = self._step_pytorch(
+                    ssm_state, k_state, v_state, A, B, C, self.D,
+                    x, z, DT, trap, xpj, zpj, outpj,
+                )
+                ssm_state.copy_(new_state)
 
         # out_proj
         out = rearrange(y, "b h p -> b (h p)")

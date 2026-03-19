@@ -2,10 +2,12 @@ import torch
 from functools import partial
 from typing import Callable
 
+from mamba_ssm.utils.device import get_accelerator_type
+
 def custom_amp_decorator(dec: Callable, cuda_amp_deprecated: bool):
     def decorator(*args, **kwargs):
         if cuda_amp_deprecated:
-            kwargs["device_type"] = "cuda"
+            kwargs["device_type"] = get_accelerator_type()
         return dec(*args, **kwargs)
     return decorator
 
