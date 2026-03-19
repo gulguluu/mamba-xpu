@@ -26,6 +26,8 @@ try:
 except ImportError:
     mamba3_step_fn = None
 
+from mamba_ssm.ops.triton.mamba3.mamba3_siso_step import mamba3_siso_step
+
 class Mamba3(nn.Module):
     def __init__(
         self,
@@ -293,6 +295,7 @@ class Mamba3(nn.Module):
         """Pure PyTorch step implementation for XPU and non-CUDA devices.
 
         Mirrors the CUTLASS mamba3_step_fn kernel logic using standard PyTorch ops.
+        Uses vectorized einsum operations for GPU-friendly execution.
         """
         compute_dtype = torch.float32
         batch, nheads, hdim, dstate = state.shape

@@ -361,7 +361,7 @@ def capture_graph(
     inference_params.lengths_per_sample[:] = inference_params.seqlen_offset
 
     if device.type == "xpu":
-        # XPU path: no CUDA graph support, use eager execution
+        # XPU path: use torch.compile for optimized execution instead of CUDA graphs
         for _ in range(n_warmups):
             logits = model(
                 input_ids,
@@ -370,11 +370,25 @@ def capture_graph(
                 num_last_tokens=decoding_seqlen,
             ).logits
 
+        # Try to compile the model for better XPU performance
+        try:
+            compiled_model = torch.compile(model, mode="reduce-overhead", dynamic=False)
+            # Warmup the compiled model
+            _ = compiled_model(
+                input_ids,
+                position_ids=position_ids,
+                inference_params=inference_params,
+                num_last_tokens=decoding_seqlen,
+            ).logits
+            _model = compiled_model
+        except Exception:
+            _model = model
+
         def run(new_input_ids, new_position_ids, seqlen):
             inference_params.lengths_per_sample[:] = seqlen
             input_ids.copy_(new_input_ids)
             position_ids.copy_(new_position_ids)
-            return model(
+            return _model(
                 input_ids,
                 position_ids=position_ids,
                 inference_params=inference_params,

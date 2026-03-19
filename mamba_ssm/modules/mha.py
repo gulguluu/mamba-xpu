@@ -22,6 +22,10 @@ try:
 except ImportError:
     causal_conv1d_fn, causal_conv1d_update = None, None
 
+if causal_conv1d_fn is None:
+    from mamba_ssm.ops.triton.causal_conv1d import causal_conv1d_fn_pt as causal_conv1d_fn
+    from mamba_ssm.ops.triton.causal_conv1d import causal_conv1d_update_pt as causal_conv1d_update
+
 
 def _update_kv_cache(kv, inference_params, layer_idx):
     """kv: (batch_size, seqlen, 2, nheads, head_dim) or (batch_size, 1, 2, nheads, head_dim)"""

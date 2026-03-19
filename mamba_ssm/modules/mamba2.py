@@ -13,6 +13,11 @@ try:
 except ImportError:
     causal_conv1d_fn, causal_conv1d_update = None, None
 
+# Use PyTorch fallback for causal_conv1d on non-CUDA devices (Intel XPU, etc.)
+if causal_conv1d_fn is None:
+    from mamba_ssm.ops.triton.causal_conv1d import causal_conv1d_fn_pt as causal_conv1d_fn
+    from mamba_ssm.ops.triton.causal_conv1d import causal_conv1d_update_pt as causal_conv1d_update
+
 try:
     from causal_conv1d.causal_conv1d_varlen import causal_conv1d_varlen_states
 except ImportError:

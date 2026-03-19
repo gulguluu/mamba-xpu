@@ -15,12 +15,20 @@ except ImportError:
     causal_conv1d_bwd_function = None
     causal_conv1d_update_function = None
 
+if causal_conv1d_fn is None:
+    from mamba_ssm.ops.triton.causal_conv1d import causal_conv1d_fn_pt as causal_conv1d_fn
+
 from mamba_ssm.ops.triton.layer_norm import _layer_norm_fwd
 
 try:
     import selective_scan_cuda
 except ImportError:
     selective_scan_cuda = None
+
+try:
+    from mamba_ssm.ops.triton.selective_scan_triton import selective_scan_triton
+except ImportError:
+    selective_scan_triton = None
 
 
 class SelectiveScanFn(torch.autograd.Function):
@@ -113,7 +121,11 @@ def selective_scan_fn(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_
     not considered in the backward pass.
     """
     if selective_scan_cuda is None:
-        # Fallback to pure PyTorch reference implementation (for XPU and other non-CUDA devices)
+        # Use Triton kernel when available (much faster than pure Python loop)
+        if selective_scan_triton is not None and not A.is_complex():
+            return selective_scan_triton(u, delta, A, B, C, D=D, z=z, delta_bias=delta_bias,
+                                         delta_softplus=delta_softplus, return_last_state=return_last_state)
+        # Fallback to pure PyTorch reference implementation
         return selective_scan_ref(u, delta, A, B, C, D=D, z=z, delta_bias=delta_bias,
                                   delta_softplus=delta_softplus, return_last_state=return_last_state)
     return SelectiveScanFn.apply(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state)
