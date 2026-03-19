@@ -354,11 +354,10 @@ class Mamba3(nn.Module):
 
     def step(self, u, angle_state, ssm_state, k_state, v_state, **kwargs):
         """
-        Decode function using CuteDSL kernel from mamba3_step_fn.py.
-        Also modify the state vars in-place for the next step.
+        Decode function for single-token generation.
 
-        NOTE: Only tested on H100. Compatibility with other hardware
-        will be made available in the future.
+        Uses CUTLASS kernel on CUDA (H100+), Triton kernel on XPU/other GPUs
+        for SISO, and PyTorch fallback for MIMO on non-CUDA.
 
         Args:
             u: (batch, d_model)
@@ -377,7 +376,7 @@ class Mamba3(nn.Module):
 
         # in_proj
         zxBCdt = self.in_proj(u)
-        z, x, B, C, dd_dt, dd_A, trap, angles = torch.split(
+        z, x, B, C, dd_dt, dd_A, trap_proj, angle_proj = torch.split(
             zxBCdt,
             [
                 self.d_inner,
@@ -391,20 +390,99 @@ class Mamba3(nn.Module):
             ],
             dim=-1)
 
+        # Choose kernel: CUTLASS (CUDA), Triton SISO (XPU/other GPU), or PyTorch (fallback)
+        use_cute_kernel = (mamba3_step_fn is not None and x.is_cuda)
+        use_triton_siso = (not use_cute_kernel and not self.is_mimo
+                           and mamba3_siso_step is not None)
+
+        if use_triton_siso:
+            # ===== Triton SISO step path (XPU and non-CUDA GPUs) =====
+            # The Triton kernel handles bias addition, rotary, and state update
+            # in a single fused kernel — no need for separate _preprocess + rotary.
+
+            # Compute A and DT
+            _A = -F.softplus(dd_A.to(torch.float32))
+            _A = torch.clamp(_A, max=-self.A_floor)
+            DT = F.softplus(dd_dt + self.dt_bias)
+            ADT = _A * DT  # (batch, nheads)
+
+            # Reshape B, C and apply norms (but NOT bias — Triton kernel adds bias)
+            rank = 1  # SISO
+            B_normed = rearrange(B, "b (r g s) -> b r g s", g=self.num_bc_heads, r=rank)
+            C_normed = rearrange(C, "b (r g s) -> b r g s", g=self.num_bc_heads, r=rank)
+            B_normed = self.B_norm(B_normed)
+            C_normed = self.C_norm(C_normed)
+            B_normed = B_normed.squeeze(1)  # (batch, nheads_qk, d_state)
+            C_normed = C_normed.squeeze(1)  # (batch, nheads_qk, d_state)
+            # Expand nheads_qk -> nheads if needed (GQA)
+            if self.num_bc_heads != self.nheads:
+                B_normed = B_normed.expand(-1, self.nheads, -1)
+                C_normed = C_normed.expand(-1, self.nheads, -1)
+
+            x_reshaped = rearrange(x, "b (h p) -> b h p", p=self.headdim)
+            z_reshaped = rearrange(z, "b (h p) -> b h p", p=self.headdim)
+            angles_expanded = angle_proj.unsqueeze(-2).expand(-1, self.nheads, -1)
+
+            # Q_bias, K_bias: (nheads, d_state)
+            q_bias = self.C_bias.squeeze(1)  # (nheads, d_state)
+            k_bias = self.B_bias.squeeze(1)  # (nheads, d_state)
+
+            # Build input states for Triton kernel
+            # Triton expects: (angle_state, ssm_state, k_state (batch, nheads, d_state), v_state)
+            # Current k_state shape: (batch, 1, nheads, d_state) → squeeze mimo dim
+            k_state_squeezed = k_state.squeeze(1)  # (batch, nheads, d_state)
+            input_states = (angle_state, ssm_state, k_state_squeezed, v_state)
+
+            y, output_states = mamba3_siso_step(
+                Q=C_normed.contiguous(),
+                K=B_normed.contiguous(),
+                V=x_reshaped.contiguous(),
+                ADT=ADT,
+                DT=DT,
+                Trap=trap_proj,  # raw trap, kernel applies sigmoid
+                Q_bias=q_bias.contiguous(),
+                K_bias=k_bias.contiguous(),
+                Angles=angles_expanded.contiguous(),
+                D=self.D if not self.is_outproj_norm else self.D,
+                Z=z_reshaped if not self.is_outproj_norm else None,
+                Input_States=input_states,
+            )
+
+            nxt_angle_state, new_ssm_state, nxt_k_state_flat, nxt_v_state = output_states
+            ssm_state.copy_(new_ssm_state)
+            nxt_k_state = nxt_k_state_flat.unsqueeze(1)  # (batch, 1, nheads, d_state)
+
+            if self.is_outproj_norm:
+                z_r = rearrange(z_reshaped, "b h p -> b (h p)")
+                y_flat = rearrange(y, "b h p -> b (h p)")
+                y_flat = self.norm(y_flat.float(), z_r.float())
+                y = rearrange(y_flat, "b (h p) -> b h p", p=self.headdim)
+
+            # out_proj
+            out = rearrange(y, "b h p -> b (h p)")
+            out = self.out_proj(out.to(x.dtype))
+
+            angle_state.copy_(nxt_angle_state)
+            k_state.copy_(nxt_k_state)
+            v_state.copy_(nxt_v_state)
+
+            return out, nxt_angle_state, ssm_state, nxt_k_state, nxt_v_state
+
+        # ===== Shared preprocessing for CUTLASS and PyTorch fallback paths =====
         DT, B, C, x, z, trap, A, angles = self._preprocess(
-            dd_A, dd_dt, B, C, x, z, trap, angles)
+            dd_A, dd_dt, B, C, x, z, trap_proj, angle_proj)
 
         bias_q = rearrange(self.C_bias, "h r n -> r h n")
         bias_k = rearrange(self.B_bias, "h r n -> r h n")
 
-        # NOTE: MIMO calls the Tilelang kernel, 
+        # NOTE: MIMO calls the Tilelang kernel,
         # which permute the blockwise rotation matrix so that
         # the i-th entry is paired with the i+N//2-th entry:
         rotate_pairwise = not self.is_mimo
         C, B, nxt_angle_state = apply_rotary_qk_inference_fwd(
-            q=C, k=B, angle_state=angle_state, 
-            angle_proj=angles, dt=DT, bias_q=bias_q, bias_k=bias_k, 
-            conjugate=False, inplace=False, # NOTE: inplace is incompatible with self.nheads != self.num_bc_heads
+            q=C, k=B, angle_state=angle_state,
+            angle_proj=angles, dt=DT, bias_q=bias_q, bias_k=bias_k,
+            conjugate=False, inplace=False,
             rotate_pairwise=rotate_pairwise)
 
         nxt_v_state = x
@@ -419,58 +497,26 @@ class Mamba3(nn.Module):
             zpj = torch.ones(self.mimo_rank, self.nheads, self.headdim, device=z.device, dtype=z.dtype)
             outpj = torch.ones(self.mimo_rank, self.nheads, self.headdim, device=x.device, dtype=x.dtype)
 
-        # Choose between CUTLASS kernel (CUDA) and PyTorch fallback (XPU/other)
-        use_cute_kernel = (mamba3_step_fn is not None and x.is_cuda)
-
         if use_cute_kernel:
+            # ===== CUTLASS kernel path (CUDA/H100) =====
             if self.is_outproj_norm:
                 batch = x.shape[0]
                 y = torch.empty(batch, self.mimo_rank, self.nheads, self.headdim, device=x.device, dtype=x.dtype)
                 mamba3_step_fn(
-                    ssm_state,
-                    k_state,
-                    v_state,
-                    A,
-                    B,
-                    C,
-                    self.D,
-                    x,
-                    DT,
-                    trap,
-                    xpj,
-                    outproj=None,
-                    state_out=None,
-                    out=y,
-                    z=None,
-                    zproj=None,
-                    tile_D=64,
-                    num_warps=4,
+                    ssm_state, k_state, v_state, A, B, C, self.D, x, DT, trap, xpj,
+                    outproj=None, state_out=None, out=y, z=None, zproj=None,
+                    tile_D=64, num_warps=4,
                 )
                 y = self._postprocess(y, outpj, z, zpj, self.headdim)
             else:
                 y = torch.empty_like(x)
                 mamba3_step_fn(
-                    ssm_state,
-                    k_state,
-                    v_state,
-                    A,
-                    B,
-                    C,
-                    self.D,
-                    x,
-                    DT,
-                    trap,
-                    xpj,
-                    outproj=outpj,
-                    state_out=None,
-                    out=y,
-                    z=z,
-                    zproj=zpj,
-                    tile_D=64,
-                    num_warps=4,
+                    ssm_state, k_state, v_state, A, B, C, self.D, x, DT, trap, xpj,
+                    outproj=outpj, state_out=None, out=y, z=z, zproj=zpj,
+                    tile_D=64, num_warps=4,
                 )
         else:
-            # Pure PyTorch fallback for XPU and non-CUDA devices
+            # ===== PyTorch fallback (MIMO on non-CUDA, or no kernels available) =====
             if self.is_outproj_norm:
                 y, new_state = self._step_pytorch(
                     ssm_state, k_state, v_state, A, B, C, self.D,
@@ -490,9 +536,6 @@ class Mamba3(nn.Module):
         out = self.out_proj(out.to(x.dtype))
 
         angle_state.copy_(nxt_angle_state)
-        # Uncomment the following if mamba3_step_fn is not in place:
-        # state_out = torch.empty_like(ssm_state)
-        # ssm_state.copy_(state_out) 
         k_state.copy_(nxt_k_state)
         v_state.copy_(nxt_v_state)
 
